@@ -1,0 +1,220 @@
+---
+title: "Predictive Analysis of Employee Attrition using Machine Learning"
+author: "Data Science Student"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: readable
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. Objective
+
+The primary objective of this project is to analyze human resources (HR) data to uncover the driving factors behind employee turnover and to build a predictive machine learning model capable of identifying employees who are at high risk of leaving the organization.
+
+## 2. Problem Statement
+
+High employee turnover entails substantial organizational costs, including expenses related to recruitment, onboarding, training, and the temporary loss of productivity. Understanding *why* employees leave and successfully predicting *who* will leave allows HR departments to deploy targeted proactive retention strategies. 
+
+This project aims to answer two key questions:
+1. Which variables (e.g., salary, overtime, job satisfaction) most heavily influence attrition?
+2. Can we reliably predict employee attrition using a statistical machine learning model?
+
+## 3. Dataset Description
+
+Because real HR data is often highly confidential, a realistic synthetic dataset consisting of 1,000 employee records is generated for this project. The dataset encompasses various demographic and job-related variables:
+
+* **Age** (Numeric): The employee's age in years (Range: 18 - 65).
+* **Department** (Categorical): The corporate department (Sales, R&D, HR).
+* **JobSatisfaction** (Ordinal): Self-reported satisfaction score on a scale from 1 (Low) to 4 (High).
+* **OverTime** (Categorical): Indicates whether the employee regularly works overtime (Yes/No).
+* **MonthlyIncome** (Numeric): The employee's estimated monthly salary in USD.
+* **YearsAtCompany** (Numeric): The number of years the employee has spent at the company.
+* **Attrition** (Target Variable): Indicates whether the employee has left the company (Yes/No).
+
+---
+
+## 4. Methodology and Data Generation
+
+### Loading Required Libraries
+
+```{r load-libraries}
+packages <- c("dplyr", "tidyr", "ggplot2", "caret", "e1071")
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages], repos = "https://cran.r-project.org/")
+}
+library(dplyr)
+library(ggplot2)
+library(caret)
+```
+
+### Generating the Dataset
+
+Below, we generate the synthetic HR dataset.
+
+```{r generate-data}
+set.seed(42) # For reproducibility
+n <- 1000
+
+# Generating features
+Age <- pmax(18, pmin(round(rnorm(n, mean = 38, sd = 10)), 65))
+Department <- sample(c("Sales", "Research & Development", "Human Resources"), n, replace = TRUE, prob = c(0.3, 0.6, 0.1))
+JobSatisfaction <- sample(1:4, n, replace = TRUE, prob = c(0.15, 0.2, 0.35, 0.3))
+OverTime <- sample(c("Yes", "No"), n, replace = TRUE, prob = c(0.28, 0.72))
+
+# Income depends on department
+MonthlyIncome <- ifelse(Department == "Sales", rnorm(n, 5500, 1500),
+                 ifelse(Department == "Research & Development", rnorm(n, 6500, 2000),
+                        rnorm(n, 4800, 1200)))
+MonthlyIncome <- round(abs(MonthlyIncome)) + 2000
+YearsAtCompany <- round(runif(n, min = 0, max = Age - 18))
+
+# Simulating Attrition based on a logistic function
+logit_score <- 1.5 - 0.04 * Age + 1.8 * (OverTime == "Yes") - 0.6 * JobSatisfaction - 0.00015 * MonthlyIncome + 0.05 * YearsAtCompany
+logit_score <- logit_score + rnorm(n, 0, 1) # random noise
+prob_attrition <- 1 / (1 + exp(-logit_score))
+Attrition <- ifelse(prob_attrition > 0.50, "Yes", "No")
+
+# Combine into a dataframe
+hr_data <- data.frame(Age, Department, JobSatisfaction, OverTime, MonthlyIncome, YearsAtCompany, Attrition)
+```
+
+### Data Preprocessing
+
+We verify the absence of missing values and properly format categorical features.
+
+```{r data-prep}
+# Check for missing values
+sum(is.na(hr_data))
+
+# Format data types
+hr_data <- hr_data %>%
+  mutate(
+    Department = as.factor(Department),
+    JobSatisfaction = as.factor(JobSatisfaction), # Factor for categorical plotting/modeling
+    OverTime = as.factor(OverTime),
+    Attrition = as.factor(Attrition)
+  )
+
+summary(hr_data)
+```
+
+---
+
+## 5. Exploratory Data Analysis (EDA)
+
+Visualizing the data helps us understand the relationships between different attributes and our target variable `Attrition`.
+
+### Target Distribution
+
+```{r eda-attrition, fig.width=6, fig.height=4}
+ggplot(hr_data, aes(x = Attrition, fill = Attrition)) +
+  geom_bar() +
+  scale_fill_manual(values = c("No" = "#4CAF50", "Yes" = "#F44336")) +
+  labs(title = "Distribution of Employee Attrition", x = "Attrition", y = "Employee Count") +
+  theme_minimal()
+```
+*Insight*: The dataset is slightly imbalanced, which is highly typical for human resources data (most employees stay).
+
+### The Impact of Overtime
+
+```{r eda-overtime, fig.width=6, fig.height=4}
+ggplot(hr_data, aes(x = OverTime, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of Attrition by OverTime", x = "OverTime", y = "Percentage") +
+  theme_minimal()
+```
+*Insight*: There is a substantially higher percentage of attrition among employees who work overtime compared to those who do not.
+
+### Age and Monthly Income Dynamics
+
+```{r eda-age-income, fig.width=10, fig.height=4}
+# Income Density
+plot_inc <- ggplot(hr_data, aes(x = MonthlyIncome, fill = Attrition)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Monthly Income Density by Attrition", x = "Monthly Income", y = "Density") +
+  theme_minimal()
+
+# Age Boxplot
+plot_age <- ggplot(hr_data, aes(x = Attrition, y = Age, fill = Attrition)) +
+  geom_boxplot() +
+  labs(title = "Employee Age vs Attrition", x = "Attrition", y = "Age") +
+  theme_light()
+
+gridExtra::grid.arrange(plot_inc, plot_age, ncol=2)
+```
+*Insight*: Lower monthly incomes and younger age brackets visibly skew towards a higher likelihood of attrition.
+
+---
+
+## 6. Implementation of Machine Learning Model
+
+We will construct a **Logistic Regression** model since our target is a binary categorical outcome.
+
+### Train-Test Split
+
+```{r model-split}
+set.seed(123)
+# 70% Training / 30% Testing Split
+trainIndex <- createDataPartition(hr_data$Attrition, p = 0.7, list = FALSE, times = 1)
+data_train <- hr_data[trainIndex, ]
+data_test  <- hr_data[-trainIndex, ]
+```
+
+### Model Training
+
+```{r model-train}
+logit_model <- glm(Attrition ~ Age + Department + JobSatisfaction + OverTime + MonthlyIncome + YearsAtCompany, 
+                   data = data_train, 
+                   family = binomial)
+
+summary(logit_model)
+```
+*Analysis of Model Output*: The p-values `Pr(>|z|)` indicate that `Age`, `OverTime`, `JobSatisfaction`, and `MonthlyIncome` are statistically significant predictors at the `0.05` alpha level.
+
+### Model Evaluation
+
+```{r model-eval}
+# Generate probability predictions
+pred_prob <- predict(logit_model, newdata = data_test, type = "response")
+
+# Convert to Class Labels (Decision Threshold: 50%)
+pred_class <- as.factor(ifelse(pred_prob > 0.5, "Yes", "No"))
+levels(pred_class) <- levels(data_test$Attrition)
+
+# Confusion Matrix
+conf_matrix <- confusionMatrix(pred_class, data_test$Attrition)
+conf_matrix
+```
+
+---
+
+## 7. Results and Conclusion
+
+### Key Findings
+1. **Model Efficacy**: The logistic regression model establishes an accuracy of approximately **`r round(conf_matrix$overall['Accuracy'] * 100, 2)`%**, which is a strong baseline.
+2. **Actionable Variables**: `OverTime`, `JobSatisfaction`, and Salary bands represent actionable items for HR departments. Overworked and underpaid associates exhibit the highest risk.
+
+### Business Recommendations
+The logistic regression model provides HR with a pragmatic tool to flag employees exhibiting "high-risk" profiles. Reallocating budget to retention programs (like targeted raises, restricting overtime, or addressing workplace morale) for flagged employees can result in substantial cost savings.
+
+## 8. Suggestions for Future Improvement
+*   **Feature Engineering**: Incorporating features like literal commute time, performance rating, and survey scores from peers.
+*   **Tree-based Ensembles**: Trying non-linear classifiers like Random Forest or XGBoost.
+*   **Cross Validation**: Using k-fold cross-validation to guarantee the robustness of the accuracy metrics.
+
+## 9. References
+*   R Core Team (2023). *R: A language and environment for statistical computing*. R Foundation for Statistical Computing, Vienna, Austria.
+*   Wickham, H., et al. (2019). Welcome to the tidyverse. *Journal of Open Source Software*, 4(43), 1686.
+*   Kuhn, M. (2008). Building Predictive Models in R Using the caret Package. *Journal of Statistical Software*, 28(5), 1-26.
